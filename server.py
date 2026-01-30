@@ -137,7 +137,7 @@ async def wegweiser_get_chart(
 def main():
     print("[Wegweiser Kommune MCP] Starting server...")
     try:
-        mcp.run(transport="streamable-http", host="0.0.0.0", port=8010)
+        mcp.run(transport="streamable-http", host="0.0.0.0", port=8011)
         print("[Wegweiser Kommune MCP] Finished")
     except Exception as e:
         print(f"[Wegweiser Kommune MCP] Error: {e}")
