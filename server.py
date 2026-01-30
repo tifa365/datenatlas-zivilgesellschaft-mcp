@@ -11,7 +11,7 @@ from tools import (
     search_regions,
 )
 
-mcp = FastMCP("wegweiser-kommune")
+mcp = FastMCP(name="wegweiser-kommune", stateless_http=True)
 
 
 @mcp.tool()
