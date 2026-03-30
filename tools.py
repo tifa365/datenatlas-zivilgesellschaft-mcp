@@ -1,402 +1,259 @@
 """
-Wegweiser Kommune MCP Tools
+Bertelsmann Datenatlas Zivilgesellschaft MCP helpers.
 
-Core tools for accessing statistical data about German municipalities
-from the Bertelsmann Stiftung Wegweiser Kommune API.
+This module implements a focused, AI-facing subset of the Datenatlas piveau
+search API: search, advanced search, scroll pagination, a location helper, and
+public CKAN-compatible dataset detail lookup.
 """
 
-import base64
-from typing import Optional
+from __future__ import annotations
+
+import json
+import os
+from typing import Any, Literal, Optional
 
 import httpx
 
-BASE_URL = "https://www.wegweiser-kommune.de/data-api"
+SEARCH_FILTER = Literal["catalogue", "dataset", "dataservice", "resource", "vocabulary"]
+DATE_TYPE = Literal["issued", "modified", "temporal"]
+LOGIC_OPERATOR = Literal["AND", "OR"]
+ACCESS_PERMISSION = Literal["view", "edit", "publish", "delete"]
+
+DEFAULT_BASE_URL = "https://piveau-search.datenkatalog.datenatlas-zivilgesellschaft.de"
+BASE_URL_ENV = "PIVEAU_SEARCH_BASE_URL"
+API_KEY_ENV = "PIVEAU_API_KEY"
+BEARER_TOKEN_ENV = "PIVEAU_BEARER_TOKEN"
+DEFAULT_TIMEOUT_SECONDS = 30.0
 
 
-async def _make_request(
-    method: str,
-    endpoint: str,
-    params: Optional[dict] = None,
-    json_body: Optional[dict] = None,
-) -> dict | list | str:
-    """Make an HTTP request to the Wegweiser Kommune API."""
-    url = f"{BASE_URL}{endpoint}"
+def _base_url() -> str:
+    configured_base_url = os.getenv(BASE_URL_ENV, "").strip().rstrip("/")
+    if configured_base_url:
+        return configured_base_url
+    return DEFAULT_BASE_URL
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        if method == "GET":
-            response = await client.get(url, params=params)
-        elif method == "POST":
-            response = await client.post(url, params=params, json=json_body)
+
+def _headers() -> dict[str, str]:
+    headers = {"Accept": "application/json"}
+
+    api_key = os.getenv(API_KEY_ENV, "").strip()
+    bearer_token = os.getenv(BEARER_TOKEN_ENV, "").strip()
+
+    if api_key:
+        headers["X-API-Key"] = api_key
+    if bearer_token:
+        headers["Authorization"] = f"Bearer {bearer_token}"
+
+    return headers
+
+
+def _compact(value: dict[str, Any]) -> dict[str, Any]:
+    return {key: item for key, item in value.items() if item is not None}
+
+
+def _normalize_query_params(params: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+
+    for key, value in params.items():
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            normalized[key] = str(value).lower()
+        elif isinstance(value, list):
+            normalized[key] = ",".join(str(item) for item in value)
+        elif isinstance(value, dict):
+            normalized[key] = json.dumps(value)
         else:
-            raise ValueError(f"Unsupported HTTP method: {method}")
+            normalized[key] = value
 
+    return normalized
+
+
+async def _request(
+    method: str,
+    path: str,
+    *,
+    params: Optional[dict[str, Any]] = None,
+    json_body: Optional[dict[str, Any]] = None,
+) -> Any:
+    url = f"{_base_url()}{path}"
+
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS,
+        headers=_headers(),
+    ) as client:
+        response = await client.request(method, url, params=params, json=json_body)
+
+    try:
         response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text.strip()
+        raise RuntimeError(
+            f"piveau request failed with {exc.response.status_code} for {path}: {detail}"
+        ) from exc
 
-        content_type = response.headers.get("content-type", "")
-        if "application/json" in content_type:
-            return response.json()
-        return response.text
+    content_type = response.headers.get("content-type", "")
+    if "application/json" in content_type:
+        return response.json()
 
-
-async def search_regions(
-    search: Optional[str] = None,
-    max_results: int = 10,
-    types: Optional[list[str]] = None,
-    exclude_ids: Optional[list[int]] = None,
-) -> list[dict]:
-    """
-    Search for municipalities (Kommunen) by name or filter criteria.
-
-    Args:
-        search: Optional search text to find matching municipalities
-        max_results: Maximum number of results to return (default: 10)
-        types: Filter by region types. Options: BUND, BUNDESLAND, GEMEINDE,
-               KLEINE_GEMEINDE, KREISFREIE_STADT, LANDKREIS
-        exclude_ids: List of region IDs to exclude from results
-
-    Returns:
-        List of matching regions with their metadata (name, friendlyUrl, ags, ars, type, etc.)
-    """
-    params = {"max": max_results}
-    if search:
-        params["search"] = search
-    if types:
-        params["types"] = types
-    if exclude_ids:
-        params["exclude"] = exclude_ids
-
-    return await _make_request("GET", "/rest/region/list", params=params)
+    return {
+        "content_type": content_type,
+        "content": response.text,
+    }
 
 
-async def get_region(friendly_url: str) -> dict:
-    """
-    Get detailed information about a specific municipality.
-
-    Args:
-        friendly_url: The URL-friendly identifier of the region
-                      (e.g., "berlin", "guetersloh-gt", "nordrhein-westfalen")
-
-    Returns:
-        Region details including name, title, ags, ars, demographicType, type, parent
-    """
-    return await _make_request("GET", f"/rest/region/get/{friendly_url}")
-
-
-async def filter_regions(
-    ags: Optional[list[str]] = None,
-    demographic_types: Optional[list[int]] = None,
-    parent_ids: Optional[list[int]] = None,
-    populations: Optional[list[str]] = None,
-    region_types: Optional[list[str]] = None,
+async def search_datasets(
+    q: Optional[str] = None,
+    filters: Optional[list[SEARCH_FILTER]] = None,
+    facets: Optional[dict[str, list[str]]] = None,
+    page: int = 0,
+    limit: int = 10,
+    sort: Optional[list[str]] = None,
+    show_score: bool = False,
+    aggregation: bool = True,
+    scroll: bool = False,
 ) -> dict:
     """
-    Advanced filtering of municipalities by various criteria.
+    Run a basic dataset search against the piveau search API.
 
-    Args:
-        ags: AGS/ARS codes to filter by (supports wildcards like "05*" for NRW)
-        demographic_types: Filter by demographic type numbers (1-9)
-        parent_ids: Filter by parent region IDs
-        populations: Population ranges (e.g., "50000-100000")
-        region_types: Administrative types (BUND, BUNDESLAND, GEMEINDE, etc.)
-
-    Returns:
-        Filter result with friendlyUrl, name, title, and list of matching regions
-    """
-    body = {}
-    if ags:
-        body["ags"] = ags
-    if demographic_types:
-        body["demographicTypes"] = demographic_types
-    if parent_ids:
-        body["parentIds"] = parent_ids
-    if populations:
-        body["populations"] = populations
-    if region_types:
-        body["regionTypes"] = region_types
-
-    return await _make_request("POST", "/rest/region/filter", json_body=body)
-
-
-async def search_indicators(
-    search: Optional[str] = None,
-    max_results: int = 10,
-    exclude_ids: Optional[list[int]] = None,
-) -> list[dict]:
-    """
-    Search for statistical indicators by keyword.
-
-    Args:
-        search: Search text to find matching indicators (e.g., "Geburten", "Frauen")
-        max_results: Maximum number of results to return (default: 10)
-        exclude_ids: List of indicator IDs to exclude from results
-
-    Returns:
-        List of matching indicators with basic metadata
-    """
-    params = {"max": max_results}
-    if search:
-        params["search"] = search
-    if exclude_ids:
-        params["exclude"] = exclude_ids
-
-    return await _make_request("GET", "/rest/indicator/list", params=params)
-
-
-async def get_indicator(friendly_url: str) -> dict:
-    """
-    Get detailed metadata about a specific indicator.
-
-    Args:
-        friendly_url: The URL-friendly identifier of the indicator (e.g., "geburten")
-
-    Returns:
-        Full indicator details including calculation, explanation, source,
-        available years, unit, colorSchema, and more
-    """
-    return await _make_request("GET", f"/rest/indicator/get/{friendly_url}")
-
-
-async def search_topics(
-    search: Optional[str] = None,
-    max_results: int = 10,
-    exclude_ids: Optional[list[int]] = None,
-) -> list[dict]:
-    """
-    Search for topics (thematic groupings of indicators).
-
-    Args:
-        search: Search text to find matching topics (e.g., "Alter", "Wirtschaft")
-        max_results: Maximum number of results to return (default: 10)
-        exclude_ids: List of topic IDs to exclude from results
-
-    Returns:
-        List of matching topics with basic metadata
-    """
-    params = {"max": max_results}
-    if search:
-        params["search"] = search
-    if exclude_ids:
-        params["exclude"] = exclude_ids
-
-    return await _make_request("GET", "/rest/topic/list", params=params)
-
-
-async def get_topic(friendly_url: str) -> dict:
-    """
-    Get a topic with its sub-topics and contained indicators.
-
-    Args:
-        friendly_url: The URL-friendly identifier of the topic
-                      (e.g., "demografische-entwicklung")
-
-    Returns:
-        Topic details including name, title, explanation, indicators, and sub-topics
-    """
-    return await _make_request("GET", f"/rest/topic/get/{friendly_url}")
-
-
-async def search_topics_and_indicators(
-    search: Optional[str] = None,
-    max_results: int = 10,
-    exclude_indicator_ids: Optional[list[int]] = None,
-    exclude_topic_ids: Optional[list[int]] = None,
-) -> list[dict]:
-    """
-    Combined search for both topics and indicators.
-
-    Args:
-        search: Search text to find matching topics and indicators
-        max_results: Maximum number of results to return (default: 10)
-        exclude_indicator_ids: Indicator IDs to exclude
-        exclude_topic_ids: Topic IDs to exclude
-
-    Returns:
-        List of matching topics and indicators
-    """
-    params = {"max": max_results}
-    if search:
-        params["search"] = search
-    if exclude_indicator_ids:
-        params["excludeIndicator"] = exclude_indicator_ids
-    if exclude_topic_ids:
-        params["excludeTopic"] = exclude_topic_ids
-
-    return await _make_request("GET", "/rest/indicator/orTopic", params=params)
-
-
-async def get_statistics(friendly_url: str) -> dict:
-    """
-    Fetch statistical data using a friendly URL.
-
-    Args:
-        friendly_url: Describes the desired topics/indicators, regions, years,
-                      and display type. Format matches the statistics page URL.
-                      Example: "demografische-entwicklung+berlin+muenchen+2006-2019+tabelle"
-
-    Returns:
-        Statistical data response with indicators, regions, values, and metadata
-    """
-    return await _make_request("GET", f"/rest/statistics/data/{friendly_url}")
-
-
-async def get_statistics_by_ids(
-    region_ids: list[int],
-    indicator_ids: Optional[list[int]] = None,
-    topic_ids: Optional[list[int]] = None,
-    years: Optional[list[int]] = None,
-    top_regions_count: Optional[int] = None,
-    low_regions_count: Optional[int] = None,
-) -> dict:
-    """
-    Fetch statistical data using database IDs.
-
-    Args:
-        region_ids: List of region IDs (required)
-        indicator_ids: List of indicator IDs to fetch data for
-        topic_ids: List of topic IDs to fetch data for
-        years: Specific years to fetch data for
-        top_regions_count: Include N regions with highest values for comparison
-        low_regions_count: Include N regions with lowest values for comparison
-
-    Returns:
-        Statistical data response with indicators, regions, values, and metadata
-    """
-    body = {"regionIds": region_ids}
-    if indicator_ids:
-        body["indicatorIds"] = indicator_ids
-    if topic_ids:
-        body["topicIds"] = topic_ids
-    if years:
-        body["years"] = years
-    if top_regions_count:
-        body["topRegionsCount"] = top_regions_count
-    if low_regions_count:
-        body["lowRegionsCount"] = low_regions_count
-
-    return await _make_request("POST", "/rest/statistics/data", json_body=body)
-
-
-async def analyze_friendly_url(friendly_url: str) -> dict:
-    """
-    Parse and analyze a friendly URL to understand its components.
-
-    Args:
-        friendly_url: The URL to analyze
-                      Example: "demografische-entwicklung+berlin+muenchen+2006-2019+tabelle"
-
-    Returns:
-        Parsed components: indicatorsAndTopics, regionsAndRegionFilters, years, renderer, etc.
-    """
-    return await _make_request("GET", f"/rest/statistics/analyze/{friendly_url}")
-
-
-async def get_statistic_types() -> list[dict]:
-    """
-    Get descriptions of all available statistic types.
-
-    Returns:
-        List of statistic types with their supported renderers, available years,
-        and whether indicators are available
-    """
-    return await _make_request("GET", "/rest/statistics/types")
-
-
-async def get_data_version() -> str:
-    """
-    Get the current version/date of the statistical data.
-
-    Returns:
-        Date string indicating when the current data was imported
-    """
-    return await _make_request("GET", "/rest/statistics/version")
-
-
-async def list_demographic_types() -> list[dict]:
-    """
-    Get all demographic types (municipality classifications).
-
-    Returns:
-        List of demographic types with number, name, title/description,
-        and links to related documents
-    """
-    return await _make_request("GET", "/rest/demographicTypes")
-
-
-async def get_demographic_type(number: int) -> dict:
-    """
-    Get details about a specific demographic type.
-
-    Args:
-        number: The demographic type number (1-9)
-
-    Returns:
-        Demographic type details including name, title, and document links
-    """
-    return await _make_request("GET", f"/rest/demographicTypes/{number}")
-
-
-async def export_statistics(
-    friendly_url: str,
-    format: str = "json",
-    charset: str = "UTF-8",
-    raw: bool = False,
-) -> dict | str:
-    """
-    Export statistical data in various formats.
-
-    Args:
-        friendly_url: Describes the data to export (same format as statistics page)
-        format: Export format - csv, json, xls, xlsx, pdf, png, jpg, gif, svg
-        charset: Character encoding (default: UTF-8)
-        raw: If True, suppress headers and annotations
-
-    Returns:
-        Exported data in the requested format
-    """
-    params = {"charset": charset, "raw": str(raw).lower()}
-    return await _make_request("GET", f"/rest/export/{friendly_url}.{format}", params=params)
-
-
-async def export_chart_image(
-    friendly_url: str,
-    format: str = "png",
-    width: int = 600,
-    raw: bool = False,
-    highlight: Optional[str] = None,
-) -> dict:
-    """
-    Export a chart as an image (PNG, JPG, GIF, or SVG).
-
-    Args:
-        friendly_url: Describes the data to chart. Use "liniendiagramm" or "balkendiagramm"
-                      as the renderer type.
-                      Example: "geburten+berlin+guetersloh-gt+2012-2019+liniendiagramm"
-        format: Image format - png, jpg, gif, svg (default: png)
-        width: Image width in pixels, 256-2048 (default: 800)
-        raw: If True, suppress headers and annotations (default: False)
-        highlight: Comma-separated elements to highlight (from the legend)
-
-    Returns:
-        Dict with image_base64, content_type, and size_bytes
+    This tool is intended for the common case: keyword search with optional
+    content-type filters, facets, sorting, and aggregation.
     """
 
-    url = f"{BASE_URL}/rest/export/{friendly_url}.{format}"
-    params = {"width": width, "raw": str(raw).lower()}
-    if highlight:
-        params["highlight"] = highlight
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(url, params=params)
-        response.raise_for_status()
-
-        content_type = response.headers.get("content-type", "")
-        image_bytes = response.content
-        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-
-        return {
-            "content_base64": image_base64,
-            "content_type": content_type,
-            "size_bytes": len(image_bytes),
-            "width": width,
-            "format": format,
+    params = _normalize_query_params(
+        {
+            "q": q,
+            "filters": filters,
+            "facets": facets,
+            "page": page,
+            "limit": limit,
+            "sort": sort,
+            "showScore": show_score,
+            "aggregation": aggregation,
+            "scroll": scroll,
         }
+    )
+    return await _request("GET", "/search", params=params)
+
+
+async def search_datasets_advanced(
+    q: Optional[str] = None,
+    filters: Optional[list[SEARCH_FILTER]] = None,
+    facets: Optional[dict[str, list[str]]] = None,
+    page: int = 0,
+    limit: int = 10,
+    fields: Optional[list[str]] = None,
+    includes: Optional[list[str]] = None,
+    sort: Optional[list[str]] = None,
+    min_date: Optional[str] = None,
+    max_date: Optional[str] = None,
+    date_type: Optional[DATE_TYPE] = None,
+    bbox_min_lon: Optional[float] = None,
+    bbox_max_lon: Optional[float] = None,
+    bbox_min_lat: Optional[float] = None,
+    bbox_max_lat: Optional[float] = None,
+    min_scoring: Optional[int] = None,
+    max_scoring: Optional[int] = None,
+    boost: Optional[dict[str, float]] = None,
+    global_aggregation: bool = True,
+    facet_operator: LOGIC_OPERATOR = "OR",
+    facet_group_operator: LOGIC_OPERATOR = "AND",
+    filter_distributions: bool = False,
+    aggregation: bool = True,
+    aggregation_all_fields: bool = True,
+    aggregation_fields: Optional[list[str]] = None,
+    country_data: Optional[bool] = None,
+    data_services: bool = False,
+    autocomplete: bool = False,
+    show_score: bool = False,
+    vocabulary: Optional[list[str]] = None,
+    resource: Optional[list[str]] = None,
+    access_control_permissions: Optional[list[ACCESS_PERMISSION]] = None,
+    scroll: bool = False,
+    search_after: bool = False,
+    search_after_sort: Optional[list[str]] = None,
+    pit_id: Optional[str] = None,
+) -> dict:
+    """
+    Run the full search body supported by the OpenAPI spec.
+
+    Use this when keyword search needs date ranges, bounding boxes, field
+    selection, advanced facet control, or cursor-style pagination.
+    """
+
+    if (search_after_sort and not pit_id) or (pit_id and not search_after_sort):
+        raise ValueError("`pit_id` and `search_after_sort` must be provided together.")
+
+    search_params = _compact(
+        {
+            "minDate": min_date,
+            "maxDate": max_date,
+            "boundingBox": _compact(
+                {
+                    "minLon": bbox_min_lon,
+                    "maxLon": bbox_max_lon,
+                    "minLat": bbox_min_lat,
+                    "maxLat": bbox_max_lat,
+                }
+            )
+            or None,
+            "scoring": _compact({"min": min_scoring, "max": max_scoring}) or None,
+        }
+    )
+
+    body = _compact(
+        {
+            "q": q,
+            "filters": filters,
+            "facets": facets,
+            "page": page,
+            "limit": limit,
+            "fields": fields,
+            "includes": includes,
+            "sort": sort,
+            "searchParams": search_params or None,
+            "dateType": date_type,
+            "boost": boost,
+            "globalAggregation": global_aggregation,
+            "facetOperator": facet_operator,
+            "facetGroupOperator": facet_group_operator,
+            "filterDistributions": filter_distributions,
+            "aggregation": aggregation,
+            "aggregationAllFields": aggregation_all_fields,
+            "aggregationFields": aggregation_fields,
+            "countryData": country_data,
+            "dataServices": data_services,
+            "autocomplete": autocomplete,
+            "showScore": show_score,
+            "vocabulary": vocabulary,
+            "resource": resource,
+            "accessControlPermissions": access_control_permissions,
+            "scroll": scroll,
+            "searchAfter": search_after,
+            "searchAfterSort": search_after_sort,
+            "pitId": pit_id,
+            "minScoring": min_scoring,
+            "maxScoring": max_scoring,
+        }
+    )
+    return await _request("POST", "/search", json_body=body)
+
+
+async def scroll_search(scroll_id: str) -> dict:
+    """Fetch the next page for a search that was started with `scroll=true`."""
+    return await _request("GET", "/scroll", params={"scrollId": scroll_id})
+
+
+async def autocomplete_location(q: str) -> dict:
+    """Return gazetteer matches for a place name or partial location query."""
+    return await _request("GET", "/gazetteer/autocomplete", params={"q": q})
+
+
+async def get_dataset_details(dataset_id: str) -> dict:
+    """
+    Fetch one dataset by ID using the public CKAN-compatible endpoint.
+
+    This keeps the user flow on the anonymous/public side of the search API
+    instead of relying on the bearer-protected `/datasets/{id}` endpoint.
+    """
+    return await _request("GET", "/ckan/package_show", params={"id": dataset_id})
