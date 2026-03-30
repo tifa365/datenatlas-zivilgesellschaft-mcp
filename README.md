@@ -139,8 +139,7 @@ Run with Docker:
 docker compose up --build
 ```
 
-The compose setup builds the image from the local `Dockerfile`, so dependencies
-are installed during image build.
+The Docker setup builds the image from the local `Dockerfile`.
 
 ## Testing
 
@@ -163,10 +162,12 @@ Known upstream caveat:
   upstream, which is why autocomplete is not part of the primary MCP surface and
   related live tests may skip when that endpoint is unavailable
 
-## Docker Notes
+## Docker
 
-The container workflow is:
+Start the server with:
 
-1. build the image
-2. start `python3 server.py`
-3. connect to `http://127.0.0.1:8011/mcp`
+```bash
+docker compose up --build
+```
+
+The MCP endpoint is available at `http://127.0.0.1:8011/mcp`.
