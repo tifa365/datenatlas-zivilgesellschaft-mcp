@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 .env
 .DS_Store
+AGENTS.md
+PIVEAU_MCP_CHECKLIST.md
+PIVEAU_USER_SCOPE.md
+openapi_datenatlas_zivilgesellschaft.yaml
