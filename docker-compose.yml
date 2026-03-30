@@ -2,8 +2,6 @@ services:
   datenatlas_zivilgesellschaft_mcp:
     build: .
     image: datenatlas-zivilgesellschaft-mcp:local
-    volumes:
-      - ./:/app
     ports:
       - "8011:8011"
     environment:

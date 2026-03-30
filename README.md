@@ -127,10 +127,8 @@ Behavior:
 Run locally:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python3 server.py
+uv sync
+uv run python3 server.py
 ```
 
 Run with Docker:
@@ -139,15 +137,16 @@ Run with Docker:
 docker compose up --build
 ```
 
-The Docker setup builds the image from the local `Dockerfile`.
+The Docker setup builds the image from the local `Dockerfile` and installs
+dependencies via `uv`.
 
 ## Testing
 
 Run the full test suite:
 
 ```bash
-python3 -m unittest discover -s tests
-python3 -m py_compile server.py tools.py tests/test_tools.py tests/test_live_integration.py
+uv run python3 -m unittest discover -s tests
+uv run python3 -m py_compile server.py tools.py tests/test_tools.py tests/test_live_integration.py
 ```
 
 Test coverage currently includes:
