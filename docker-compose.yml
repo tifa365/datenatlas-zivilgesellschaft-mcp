@@ -1,13 +1,13 @@
 services:
-  wegweiser_kommune_mcp:
-    image: python:3.11-slim
-    working_dir: /app
+  datenatlas_zivilgesellschaft_mcp:
+    build: .
+    image: datenatlas-zivilgesellschaft-mcp:local
     volumes:
       - ./:/app
-    command: sh -c "pip install --no-cache-dir -r requirements.txt && python server.py"
     ports:
       - "8011:8011"
     environment:
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
+      - PIVEAU_SEARCH_BASE_URL=${PIVEAU_SEARCH_BASE_URL:-https://piveau-search.datenkatalog.datenatlas-zivilgesellschaft.de}
     restart: unless-stopped
