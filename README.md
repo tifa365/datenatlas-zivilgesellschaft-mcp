@@ -122,23 +122,36 @@ Behavior:
   Datenatlas endpoint automatically
 - auth is optional for the current read-only MCP surface
 
-## Development
+## Prerequisites
 
-Run locally:
+For local development:
+
+- `uv` installed locally
+
+For containerized runs:
+
+- Docker with Compose support
+
+## Run Locally
+
+Install dependencies and start the server:
 
 ```bash
 uv sync
 uv run python3 server.py
 ```
 
-Run with Docker:
+The MCP endpoint is available at `http://127.0.0.1:8011/mcp`.
+
+## Run With Docker
+
+Build the image and start the server:
 
 ```bash
 docker compose up --build
 ```
 
-The Docker setup builds the image from the local `Dockerfile` and installs
-dependencies via `uv`.
+The MCP endpoint is available at `http://127.0.0.1:8011/mcp`.
 
 ## Testing
 
@@ -160,13 +173,3 @@ Known upstream caveat:
 - the Bertelsmann `/gazetteer/autocomplete` endpoint currently returns `500`
   upstream, which is why autocomplete is not part of the primary MCP surface and
   related live tests may skip when that endpoint is unavailable
-
-## Docker
-
-Start the server with:
-
-```bash
-docker compose up --build
-```
-
-The MCP endpoint is available at `http://127.0.0.1:8011/mcp`.
